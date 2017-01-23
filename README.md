@@ -1,8 +1,4 @@
-# CS 351 Code Repository
+# CS 351: Systems Programming (Spring 2017)
 
-This is the public repository for CS 351: Systems Programming, which contains
-sample code (some of which are used in lecture demos) and template code for
-machine problems.
-
-After cloning this repository, you should replace the contents of this README
-file with, at minimum, your name, email address, and student ID.
+Josh Bowden (jbowden@hawk.iit.edu)
+A20374650
