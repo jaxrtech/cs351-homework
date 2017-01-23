@@ -6,6 +6,10 @@
 *.dSYM/
 .#*
 
+# CLion
+cmake-build-debug/
+.idea/workspace.xml
+
 # executables
 a.out
 hello
