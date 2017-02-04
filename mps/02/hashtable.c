@@ -37,11 +37,11 @@ static bucket_t *ht_get_node(hashtable_t *ht, char *key) {
 void ht_put(hashtable_t *ht, char *key, void *val) {
   bucket_t *existing = ht_get_node(ht, key);
   if (existing) {
+    free(key); // from strdup()
     if (existing->val) {
       free(existing->val);
     }
     existing->val = val;
-    free(key); // from strdup()
     return;
   }
 
@@ -104,19 +104,18 @@ void free_hashtable(hashtable_t *ht) {
 
 void ht_del(hashtable_t *ht, char *key) {
   unsigned int idx = hash(key) % ht->size;
-  bucket_t *root = ht->buckets[idx];
-  bucket_t *cur = root;
+  bucket_t **root = &ht->buckets[idx];
+  bucket_t *cur = *root;
   bucket_t *prev = NULL;
 
   while (cur) {
     if (strcmp(key, cur->key) == 0) {
       if (!prev) {
-        ht->buckets[idx] = NULL;
-        free_bucket(root);
+        *root = cur->next;
       } else {
         prev->next = cur->next;
-        free_bucket(cur);
       }
+      free_bucket(cur);
       return;
     }
     prev = cur;
