@@ -37,7 +37,11 @@ static bucket_t *ht_get_node(hashtable_t *ht, char *key) {
 void ht_put(hashtable_t *ht, char *key, void *val) {
   bucket_t *existing = ht_get_node(ht, key);
   if (existing) {
+    if (existing->val) {
+      free(existing->val);
+    }
     existing->val = val;
+    free(key); // from strdup()
     return;
   }
 
