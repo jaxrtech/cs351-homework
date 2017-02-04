@@ -94,6 +94,7 @@ static int free_bucket_f(bucket_t *b, void *ignored) {
 
 void free_hashtable(hashtable_t *ht) {
   ht_iter_bucket(ht, free_bucket_f, NULL);
+  free(ht->buckets);
   free(ht);
 }
 
@@ -142,9 +143,11 @@ void ht_rehash(hashtable_t *ht, unsigned long newsize) {
     }
     ht->buckets[i] = NULL;
   }
+  free(ht->buckets);
 
   ht->size = ht_new->size;
   ht->buckets = ht_new->buckets;
 
-  free(ht_new); // only free the temp container
+  // only free the temp container
+  free(ht_new);
 }
