@@ -23,7 +23,7 @@ hashtable_t *make_hashtable(unsigned long size) {
 }
 
 static bucket_t *ht_get_node(hashtable_t *ht, char *key) {
-  unsigned int idx = hash(key) % ht->size;
+  unsigned long idx = hash(key) % ht->size;
   bucket_t *b = ht->buckets[idx];
   while (b) {
     if (strcmp(b->key, key) == 0) {
@@ -45,7 +45,7 @@ void ht_put(hashtable_t *ht, char *key, void *val) {
     return;
   }
 
-  unsigned int idx = hash(key) % ht->size;
+  unsigned long idx = hash(key) % ht->size;
   bucket_t *b = malloc(sizeof(bucket_t));
   b->key = key;
   b->val = val;
@@ -103,7 +103,7 @@ void free_hashtable(hashtable_t *ht) {
 }
 
 void ht_del(hashtable_t *ht, char *key) {
-  unsigned int idx = hash(key) % ht->size;
+  unsigned long idx = hash(key) % ht->size;
   bucket_t **root = &ht->buckets[idx];
   bucket_t *cur = *root;
   bucket_t *prev = NULL;
