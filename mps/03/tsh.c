@@ -66,25 +66,26 @@ struct job_t jobs[MAXJOBS]; /* The job list */
 
 /* Here are the functions that you will implement */
 void eval(char *cmdline);
-int builtin_cmd(char **argv);
-void do_bgfg(char **argv);
+bool try_eval_internal(char **argv, int argc);
+void job_bg(struct job_t *job);
+void job_fg(struct job_t *job);
 void waitfg(pid_t pid);
+void send_fg_sig(int sig);
 
 void sigchld_handler(int sig);
 void sigtstp_handler(int sig);
 void sigint_handler(int sig);
 
 /* Here are helper routines that we've provided for you */
-enum parseresult_t parseline(const char *cmdline, char **argv);
+enum parseresult_t parseline(const char *cmdline, char **argv, int *argc_out);
 void sigquit_handler(int sig);
 
 void job_clear(struct job_t *job);
 void jobs_init(struct job_t *jobs);
-int jobs_last_jid(struct job_t *jobs);
-int
-jobs_add(struct job_t *jobs, pid_t pid, enum job_state_t state, char *cmdline);
+int jobs_highest_jid(struct job_t *jobs);
+int jobs_add(struct job_t *jobs, pid_t pid, enum job_state_t state, char *cmdline);
 int jobs_remove(struct job_t *jobs, pid_t pid);
-pid_t fgpid(struct job_t *jobs);
+pid_t jobs_fgpid(struct job_t *jobs);
 bool job_exists_by_pid(struct job_t *jobs, pid_t pid);
 bool job_exists_by_jid(struct job_t *jobs, int jid);
 struct job_t *jobs_get_by_pid(struct job_t *jobs, pid_t pid);
@@ -142,9 +143,12 @@ int main(int argc, char **argv)
     /* Initialize the job list */
     jobs_init(jobs);
 
+    if (verbose) {
+        printf("debug: tsh (%d:%d)\n", getpid(), getpgrp());
+    }
+
     /* Execute the shell's read/eval loop */
     while (1) {
-
         /* Read command line */
         if (emit_prompt) {
             printf("%s", prompt);
@@ -183,30 +187,46 @@ void eval(char *cmdline)
     int i;
     enum parseresult_t result;
     char *argv[MAXARGS];
+    int argc;
     enum job_state_t job_state;
     pid_t pid;
 
-    result = parseline(cmdline, argv);
+    result = parseline(cmdline, argv, &argc);
     if (result == PARSELINE_BLANK) {
         return;
     }
     if (result == PARSELINE_BG) {
         job_state = JOB_STATE_BG;
-        printf("background job requested\n");
+        if (verbose) {
+            printf("background job requested\n");
+        }
     }
     else {
         job_state = JOB_STATE_FG;
     }
 
-    for (i = 0; argv[i] != NULL; i++) {
-        printf("argv[%d]=%s%s", i, argv[i],
-               (argv[i + 1] == NULL) ? "\n" : ", ");
+    if (verbose) {
+        for (i = 0; argv[i] != NULL; i++) {
+            printf("argv[%d]=%s%s", i, argv[i],
+                   (argv[i + 1] == NULL) ? "\n" : ", ");
+        }
+    }
+
+    if (try_eval_internal(argv, argc)) {
+        return;
     }
 
     char *path = argv[0];
 
     if ((pid = fork()) == FORK_CHILD) {
-        /* searches for `path` in `environ` */
+        setpgrp(); /* set new process group for child */
+
+        if (verbose) {
+            printf("debug: starting (%d:%d) '%s'\n",
+                   getpid(), getpgrp(), cmdline);
+        }
+
+        /* execs by searching for `path` in `environ` */
         if (execvp(path, argv) == -1) {
             unix_error(path);
         }
@@ -228,7 +248,7 @@ void eval(char *cmdline)
  * argument.  Return true if the user has requested a BG job, false if
  * the user has requested a FG job.  
  */
-enum parseresult_t parseline(const char *cmdline, char **argv)
+enum parseresult_t parseline(const char *cmdline, char **argv, int *argc_out)
 {
     static char array[MAXLINE]; /* holds local copy of command line */
     char *buf = array;          /* ptr that traverses command line */
@@ -271,6 +291,7 @@ enum parseresult_t parseline(const char *cmdline, char **argv)
     argv[argc] = NULL;
 
     if (argc == 0) {  /* ignore blank line */
+        *argc_out = argc;
         return PARSELINE_BLANK;
     }
 
@@ -279,24 +300,83 @@ enum parseresult_t parseline(const char *cmdline, char **argv)
         argv[--argc] = NULL;
     }
 
+    *argc_out = argc;
     return (bg) ? PARSELINE_BG : PARSELINE_FG;
 }
 
 /* 
- * builtin_cmd - If the user has typed a built-in command then execute
+ * try_eval_internal - If the user has typed a built-in command then execute
  *    it immediately.  
  */
-int builtin_cmd(char **argv)
+bool try_eval_internal(char *argv[], int argc)
 {
-    return 0;     /* not a builtin command */
+    int fg, bg = -1;
+
+    if (argc <= 0) {
+        return false;
+    }
+
+    char *cmd = argv[0];
+    if (strcmp(cmd, "quit") == 0) {
+        exit(0);
+        return true; /* never reached */
+    }
+    else if ((fg = strcmp(cmd, "fg")) == 0 || (bg = strcmp(cmd, "bg")) == 0) {
+        int jid = jobs_highest_jid(jobs);
+        struct job_t *job = jobs_get_by_jid(jobs, jid);
+
+        if (fg == 0) {
+            job_fg(job);
+        }
+        else if (bg == 0) {
+            job_bg(job);
+        }
+        else {
+            app_error("try_eval_internal(): invalid state");
+        }
+
+        return true;
+    }
+    else if (strcmp(cmd, "jobs") == 0) {
+        jobs_list(jobs);
+        return true;
+    }
+
+    return false; /* not a builtin command */
 }
 
-/* 
- * do_bgfg - Execute the builtin bg and fg commands
+/*
+ * job_fg - Transition job into foreground and then block.
  */
-void do_bgfg(char **argv)
+void job_fg(struct job_t *job)
 {
-    return;
+    if (job->state == JOB_STATE_FG) {
+        return;
+    }
+    if (job->state == JOB_STATE_ST) {
+        kill(job->pid, SIGCONT);
+    }
+
+    job->state = JOB_STATE_FG;
+    puts(job->cmdline);
+    waitfg(job->pid);
+}
+
+/*
+ * job_bg - Transition job into background and continue execution.
+ */
+void job_bg(struct job_t *job)
+{
+    if (job->state == JOB_STATE_BG) {
+        return;
+    }
+    if (job->state == JOB_STATE_ST) {
+        kill(job->pid, SIGCONT);
+    }
+
+    job->state = JOB_STATE_BG;
+    strcat(job->cmdline, " &");
+    printf("[%d] %s", job->jid, job->cmdline);
 }
 
 /* 
@@ -304,7 +384,9 @@ void do_bgfg(char **argv)
  */
 void waitfg(pid_t pid)
 {
-    while (job_exists_by_pid(jobs, pid)) {
+    struct job_t *job;
+    while ((job = jobs_get_by_pid(jobs, pid)) != NULL) {
+        if (job->state != JOB_STATE_FG) { return; }
         pause();
     }
 }
@@ -327,7 +409,11 @@ void sigchld_handler(int sig)
     int exit_status;
     struct job_t *job;
 
-    pid = waitpid(-1, &status, WNOHANG);
+    if (verbose) {
+        printf("debug: handle SIGCHLD\n");
+    }
+
+    pid = waitpid(-1, &status, WNOHANG | WUNTRACED);
     if (pid == 0) {
         return; /* no children to reap */
     }
@@ -341,12 +427,36 @@ void sigchld_handler(int sig)
         if ((exit_status = WEXITSTATUS(status)) != 0) {
             printf("Exit status: %d\n", exit_status);
         }
+        jobs_remove(jobs, pid);
     }
     else if (WIFSIGNALED(status)) {
         psignal(WTERMSIG(status), "Exit signal");
+        jobs_remove(jobs, pid);
+    }
+    else if (WIFSTOPPED(status)) {
+        job = jobs_get_by_pid(jobs, pid);
+        if (job == NULL) {
+            app_error("sigchld_handler(): failed to get job by pid");
+            return;
+        }
+
+        job->state = JOB_STATE_ST;
+        printf("[%d] Stopped\t%s", job->jid, job->cmdline);
+    }
+}
+
+/*
+ * send_fg_sig - Send the `sig` signal to the current foreground job, if any.
+ */
+void send_fg_sig(int sig)
+{
+    int pid;
+
+    if ((pid = jobs_fgpid(jobs)) < 0) {
+        return; /* nothing currently in fg */
     }
 
-    jobs_remove(jobs, pid);
+    kill(-pid, sig);
 }
 
 /* 
@@ -356,7 +466,11 @@ void sigchld_handler(int sig)
  */
 void sigint_handler(int sig)
 {
-    return;
+    if (verbose) {
+        printf("debug: handle SIGINT\n");
+    }
+
+    send_fg_sig(sig);
 }
 
 /*
@@ -366,7 +480,11 @@ void sigint_handler(int sig)
  */
 void sigtstp_handler(int sig)
 {
-    return;
+    if (verbose) {
+        printf("debug: handle SIGTSTP\n");
+    }
+
+    send_fg_sig(sig);
 }
 
 /*********************
@@ -396,8 +514,8 @@ void jobs_init(struct job_t *jobs)
     }
 }
 
-/* jobs_last_jid - Returns largest allocated job ID */
-int jobs_last_jid(struct job_t *jobs)
+/* jobs_highest_jid - Returns largest allocated job ID */
+int jobs_highest_jid(struct job_t *jobs)
 {
     int i, max = 0;
 
@@ -406,6 +524,7 @@ int jobs_last_jid(struct job_t *jobs)
             max = jobs[i].jid;
         }
     }
+
     return max;
 }
 
@@ -455,7 +574,7 @@ int jobs_remove(struct job_t *jobs, pid_t pid)
     for (i = 0; i < MAXJOBS; i++) {
         if (jobs[i].pid == pid) {
             job_clear(&jobs[i]);
-            nextjid = jobs_last_jid(jobs) + 1;
+            nextjid = jobs_highest_jid(jobs) + 1;
             return 1;
         }
     }
@@ -463,8 +582,8 @@ int jobs_remove(struct job_t *jobs, pid_t pid)
     return 0;
 }
 
-/* fgpid - Return PID of current foreground job, 0 if no such job */
-pid_t fgpid(struct job_t *jobs)
+/* jobs_fgpid - Return PID of current foreground job, -1 if no such job */
+pid_t jobs_fgpid(struct job_t *jobs)
 {
     int i;
 
@@ -474,7 +593,7 @@ pid_t fgpid(struct job_t *jobs)
         }
     }
 
-    return 0;
+    return -1;
 }
 
 /* job_exists_by_pid - Return `true` if job exists (by PID), `false` otherwise */
